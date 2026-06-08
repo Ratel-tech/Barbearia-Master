@@ -1,0 +1,20 @@
+{
+  "name": "stitch_barbershop_management_system",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sistema de gerenciamento de barbearia com backend Rust e frontend React organizados em pastas simples.",
+  "type": "module",
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "lint": "npm --prefix frontend run lint",
+    "test": "npm --prefix frontend test && npm run api:test",
+    "api:dev": "cd backend && cargo run",
+    "api:test": "cd backend && cargo test",
+    "check": "npm --prefix frontend test && npm run build && npm run api:test"
+  },
+  "engines": {
+    "node": ">=22",
+    "npm": ">=10"
+  }
+}
