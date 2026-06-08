@@ -19,4 +19,5 @@
 - Persistir audit logs em todos os fluxos sensiveis.
 - Rate limiting por IP/usuario.
 - Segredos via cofre/variaveis de ambiente.
+- Nunca publicar `.env`, bancos locais, logs, arquivos de agente ou senhas demo. `SEED_DEMO_DATA=1` exige `DEMO_ADMIN_PASSWORD` definido fora do Git.
 - PostgreSQL gerenciado com backups e TLS.

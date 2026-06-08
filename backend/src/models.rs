@@ -41,6 +41,7 @@ pub struct RegisterBarbershop {
 #[derive(Debug, Deserialize)]
 pub struct PasswordResetRequest {
     pub email: String,
+    pub account_type: String,
 }
 
 #[derive(Debug, Deserialize)]

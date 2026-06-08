@@ -54,6 +54,7 @@ pub fn router(db: Db) -> Router {
 struct LoginRequest {
     email: String,
     password: String,
+    account_type: String,
 }
 
 async fn register_barbershop(
@@ -101,36 +102,41 @@ async fn login(
         return Err(ApiError::BadRequest("credenciais invalidas".into()));
     }
 
-    if let Some(row) = sqlx::query_as::<_, (i64, String, String, String, String, i64)>(
-        "select id, name, email, password_hash, role, barbershop_id from users where lower(email) = ?",
-    )
-    .bind(&email)
-    .fetch_optional(&db.pool)
-    .await?
-    {
-        let (id, _name, _email, password_hash, role, barbershop_id) = row;
-        if verify_password(&payload.password, &password_hash) {
-            let token = create_session(&db, id, "user", barbershop_id, &role, None).await?;
-            let user = auth_identity_from_token(&db, &token).await?;
-            return Ok(Json(AuthResponse { token, user }));
+    match account_type(&payload.account_type)? {
+        AccountType::Establishment => {
+            if let Some(row) = sqlx::query_as::<_, (i64, String, String, String, String, i64)>(
+                "select id, name, email, password_hash, role, barbershop_id from users where lower(email) = ?",
+            )
+            .bind(&email)
+            .fetch_optional(&db.pool)
+            .await?
+            {
+                let (id, _name, _email, password_hash, role, barbershop_id) = row;
+                if verify_password(&payload.password, &password_hash) {
+                    let token = create_session(&db, id, "user", barbershop_id, &role, None).await?;
+                    let user = auth_identity_from_token(&db, &token).await?;
+                    return Ok(Json(AuthResponse { token, user }));
+                }
+            }
         }
-    }
-
-    if let Some(row) = sqlx::query_as::<_, (i64, String, String, String, i64)>(
-        "select id, name, email, password_hash, barbershop_id
-         from barbers
-         where lower(email) = ? and deleted_at is null and status = 'active'",
-    )
-    .bind(&email)
-    .fetch_optional(&db.pool)
-    .await?
-    {
-        let (id, _name, _email, password_hash, barbershop_id) = row;
-        if verify_password(&payload.password, &password_hash) {
-            let token =
-                create_session(&db, id, "barber", barbershop_id, "barber", Some(id)).await?;
-            let user = auth_identity_from_token(&db, &token).await?;
-            return Ok(Json(AuthResponse { token, user }));
+        AccountType::Professional => {
+            if let Some(row) = sqlx::query_as::<_, (i64, String, String, String, i64)>(
+                "select id, name, email, password_hash, barbershop_id
+                 from barbers
+                 where lower(email) = ? and deleted_at is null and status = 'active'",
+            )
+            .bind(&email)
+            .fetch_optional(&db.pool)
+            .await?
+            {
+                let (id, _name, _email, password_hash, barbershop_id) = row;
+                if verify_password(&payload.password, &password_hash) {
+                    let token =
+                        create_session(&db, id, "barber", barbershop_id, "barber", Some(id)).await?;
+                    let user = auth_identity_from_token(&db, &token).await?;
+                    return Ok(Json(AuthResponse { token, user }));
+                }
+            }
         }
     }
 
@@ -146,7 +152,8 @@ async fn request_password_reset(
     Json(input): Json<PasswordResetRequest>,
 ) -> ApiResult<Json<PasswordResetResponse>> {
     let email = normalize_email(&input.email)?;
-    let reset_subject = find_password_reset_subject(&db, &email).await?;
+    let reset_subject =
+        find_password_reset_subject(&db, &email, account_type(&input.account_type)?).await?;
     let mut reset_token = None;
 
     if let Some((subject_id, subject_type)) = reset_subject {
@@ -231,27 +238,48 @@ async fn reset_password(
 async fn find_password_reset_subject(
     db: &Db,
     email: &str,
+    account_type: AccountType,
 ) -> ApiResult<Option<(i64, &'static str)>> {
-    if let Some((id,)) = sqlx::query_as::<_, (i64,)>("select id from users where lower(email) = ?")
-        .bind(email)
-        .fetch_optional(&db.pool)
-        .await?
-    {
-        return Ok(Some((id, "user")));
-    }
-
-    if let Some((id,)) = sqlx::query_as::<_, (i64,)>(
-        "select id from barbers
-         where lower(email) = ? and deleted_at is null and status = 'active'",
-    )
-    .bind(email)
-    .fetch_optional(&db.pool)
-    .await?
-    {
-        return Ok(Some((id, "barber")));
+    match account_type {
+        AccountType::Establishment => {
+            if let Some((id,)) =
+                sqlx::query_as::<_, (i64,)>("select id from users where lower(email) = ?")
+                    .bind(email)
+                    .fetch_optional(&db.pool)
+                    .await?
+            {
+                return Ok(Some((id, "user")));
+            }
+        }
+        AccountType::Professional => {
+            if let Some((id,)) = sqlx::query_as::<_, (i64,)>(
+                "select id from barbers
+                 where lower(email) = ? and deleted_at is null and status = 'active'",
+            )
+            .bind(email)
+            .fetch_optional(&db.pool)
+            .await?
+            {
+                return Ok(Some((id, "barber")));
+            }
+        }
     }
 
     Ok(None)
+}
+
+#[derive(Clone, Copy)]
+enum AccountType {
+    Establishment,
+    Professional,
+}
+
+fn account_type(value: &str) -> ApiResult<AccountType> {
+    match value.trim() {
+        "establishment" => Ok(AccountType::Establishment),
+        "professional" => Ok(AccountType::Professional),
+        _ => Err(ApiError::BadRequest("tipo de acesso invalido".into())),
+    }
 }
 
 fn password_reset_response(reset_token: Option<String>) -> PasswordResetResponse {
@@ -1817,6 +1845,7 @@ mod tests {
             State(db.clone()),
             Json(PasswordResetRequest {
                 email: email.clone(),
+                account_type: "establishment".to_string(),
             }),
         )
         .await
@@ -1840,6 +1869,7 @@ mod tests {
             Json(LoginRequest {
                 email: email.clone(),
                 password: "TestPassword@123".to_string(),
+                account_type: "establishment".to_string(),
             }),
         )
         .await;
@@ -1850,6 +1880,7 @@ mod tests {
             Json(LoginRequest {
                 email,
                 password: "NovaSenha@123".to_string(),
+                account_type: "establishment".to_string(),
             }),
         )
         .await;
@@ -1874,6 +1905,7 @@ mod tests {
             State(db.clone()),
             Json(PasswordResetRequest {
                 email: "nao-existe@teste.local".to_string(),
+                account_type: "establishment".to_string(),
             }),
         )
         .await
@@ -1885,6 +1917,114 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tokens.0, 0);
+    }
+
+    #[tokio::test]
+    async fn login_respects_selected_account_type() {
+        let db = test_db().await;
+        let admin_email = format!("admin-login-{}@teste.local", uuid::Uuid::new_v4());
+        let barber_email = format!("barber-login-{}@teste.local", uuid::Uuid::new_v4());
+        let Json(_) = super::register_barbershop(
+            State(db.clone()),
+            Json(RegisterBarbershop {
+                barbershop_name: "Barbearia Tipo Login".to_string(),
+                owner_name: "Administrador".to_string(),
+                email: admin_email.clone(),
+                password: "TestPassword@123".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        let headers = admin_headers(&db).await;
+        create_barber_for(&db, headers, &barber_email).await;
+
+        let establishment_login = super::login(
+            State(db.clone()),
+            Json(LoginRequest {
+                email: admin_email.clone(),
+                password: "TestPassword@123".to_string(),
+                account_type: "establishment".to_string(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(establishment_login.user.role, "admin");
+
+        let professional_login = super::login(
+            State(db.clone()),
+            Json(LoginRequest {
+                email: barber_email.clone(),
+                password: "TestPassword@123".to_string(),
+                account_type: "professional".to_string(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(professional_login.user.role, "barber");
+
+        let wrong_admin_type = super::login(
+            State(db.clone()),
+            Json(LoginRequest {
+                email: admin_email,
+                password: "TestPassword@123".to_string(),
+                account_type: "professional".to_string(),
+            }),
+        )
+        .await;
+        assert!(matches!(wrong_admin_type, Err(ApiError::Unauthorized)));
+
+        let wrong_barber_type = super::login(
+            State(db),
+            Json(LoginRequest {
+                email: barber_email,
+                password: "TestPassword@123".to_string(),
+                account_type: "establishment".to_string(),
+            }),
+        )
+        .await;
+        assert!(matches!(wrong_barber_type, Err(ApiError::Unauthorized)));
+    }
+
+    #[tokio::test]
+    async fn password_reset_respects_selected_account_type() {
+        let db = test_db().await;
+        let headers = admin_headers(&db).await;
+        let barber_email = format!("reset-barber-{}@teste.local", uuid::Uuid::new_v4());
+        let barber = create_barber_for(&db, headers, &barber_email).await;
+
+        let Json(wrong_type) = super::request_password_reset(
+            State(db.clone()),
+            Json(PasswordResetRequest {
+                email: barber_email.clone(),
+                account_type: "establishment".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(wrong_type.reset_token.is_none());
+
+        let Json(right_type) = super::request_password_reset(
+            State(db.clone()),
+            Json(PasswordResetRequest {
+                email: barber_email,
+                account_type: "professional".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(right_type.reset_token.is_some());
+
+        let stored: (String, i64) = sqlx::query_as(
+            "select subject_type, subject_id from password_reset_tokens where token = ?",
+        )
+        .bind(right_type.reset_token.unwrap())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(stored.0, "barber");
+        assert_eq!(stored.1, barber.id);
     }
 
     async fn create_client_for(db: &Db, headers: HeaderMap, name: &str) -> Client {
@@ -2390,6 +2530,7 @@ mod tests {
             Json(LoginRequest {
                 email: email.to_string(),
                 password: "TestPassword@123".to_string(),
+                account_type: "professional".to_string(),
             }),
         )
         .await

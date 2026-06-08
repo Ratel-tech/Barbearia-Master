@@ -22,6 +22,8 @@ import type { LucideIcon } from "lucide-react";
 import { api } from "./api";
 import type { Appointment, AuthUser, Barber, Client, Commission, ExtraExpense, Overview, Service } from "./api";
 import { appointmentStatusClass, canCheckoutAppointment, canEditAppointment } from "./appointment-status";
+import { accountLabel, loginPayload } from "./auth-account";
+import type { AccountType } from "./auth-account";
 import { validateBarberRequiredFields } from "./barber-validation";
 import { pagesForRole } from "./auth-permissions";
 import type { AppPage } from "./auth-permissions";
@@ -32,6 +34,7 @@ import { clientDraftFromSearch, clientSearchMatches } from "./client-search";
 import { formatMobilePhoneInput, validateClientRequiredFields } from "./client-validation";
 import { addMonths, buildMonthDays, monthLabel } from "./date-navigation";
 import { passwordResetPayload } from "./password-reset";
+import { commissionSummary, professionalAgendaSummary } from "./professional-portal";
 import { appointmentServices, serviceStatusLabel } from "./service-catalog";
 
 type Page = AppPage;
@@ -244,6 +247,19 @@ export default function App() {
     return <AuthScreen onEnter={enter} />;
   }
 
+  if (isBarber) {
+    return (
+      <ProfessionalShell
+        appointments={appointments}
+        auth={auth}
+        loading={loading}
+        onLogout={logout}
+        page={page}
+        setPage={setPage}
+      />
+    );
+  }
+
   return (
     <div className={`app-shell ${sidebarExpanded ? "is-sidebar-expanded" : ""}`}>
       <header className="app-topnav">
@@ -434,8 +450,92 @@ export default function App() {
   );
 }
 
+function ProfessionalShell({ auth, appointments, loading, page, setPage, onLogout }: {
+  auth: AuthUser;
+  appointments: Appointment[];
+  loading: boolean;
+  page: Page;
+  setPage: (page: Page) => void;
+  onLogout: () => void;
+}) {
+  const activePage = page === "comissoes" ? "comissoes" : "agenda";
+  return (
+    <div className="professional-shell">
+      <header className="professional-topbar">
+        <div>
+          <p className="eyebrow">Portal do Profissional</p>
+          <h1>{auth.name}</h1>
+          <span>{auth.barbershop_name}</span>
+        </div>
+        <button className="btn ghost compact" onClick={onLogout}>Sair</button>
+      </header>
+
+      <main className="professional-main">
+        {loading ? (
+          <div className="grid"><div className="skeleton" /><div className="skeleton" /></div>
+        ) : (
+          <>
+            {activePage === "agenda" && <ProfessionalAgenda appointments={appointments} />}
+            {activePage === "comissoes" && auth.barber_id && <ProfessionalCommissions barberId={auth.barber_id} professional />}
+          </>
+        )}
+      </main>
+
+      <nav className="professional-bottom-nav" aria-label="Navegação do profissional">
+        <button className={activePage === "agenda" ? "active" : ""} onClick={() => setPage("agenda")}>
+          <Icon name="agenda" />
+          <span>Agenda</span>
+        </button>
+        <button className={activePage === "comissoes" ? "active" : ""} onClick={() => setPage("comissoes")}>
+          <Icon name="carteira" />
+          <span>Comissões</span>
+        </button>
+      </nav>
+    </div>
+  );
+}
+
+function ProfessionalAgenda({ appointments }: { appointments: Appointment[] }) {
+  const summary = professionalAgendaSummary(appointments, localDate());
+  return (
+    <section className="grid professional-stack">
+      <div className="professional-hero card">
+        <p className="eyebrow">Agenda de Hoje</p>
+        <h2>{summary.nextAppointment ? summary.nextAppointment.client_name : "Sem próximo atendimento"}</h2>
+        <p>{summary.nextAppointment ? `${formatTime(summary.nextAppointment.starts_at)} - ${summary.nextAppointment.services}` : "Acompanhe seus próximos horários por aqui."}</p>
+      </div>
+      <div className="grid cols-3">
+        <Metric label="Hoje" value={`${summary.today.length}`} icon="agenda" />
+        <Metric label="Abertos" value={`${summary.openCount}`} icon="relogio" />
+        <Metric label="Concluídos" value={`${summary.completedCount}`} icon="sucesso" />
+      </div>
+      <section className="professional-list">
+        {summary.today.length === 0 ? (
+          <EmptyState title="Nenhum atendimento hoje" body="Quando o salão agendar clientes para você, eles aparecem nesta lista." />
+        ) : (
+          summary.today.map((appointment) => (
+            <article className="professional-appointment-card" key={appointment.id}>
+              <div>
+                <strong>{formatTime(appointment.starts_at)}</strong>
+                <h3>{appointment.client_name}</h3>
+                <p>{appointment.services}</p>
+              </div>
+              <span className={`appointment-status ${appointmentStatusClass(appointment.status)}`}>{statusLabel(appointment.status)}</span>
+            </article>
+          ))
+        )}
+      </section>
+    </section>
+  );
+}
+
+function formatTime(value: string) {
+  return value.slice(11, 16);
+}
+
 function AuthScreen({ onEnter }: { onEnter: (response: { token: string; user: AuthUser }) => Promise<void> }) {
   const [mode, setMode] = useState<"login" | "register" | "forgot" | "reset">("login");
+  const [accountType, setAccountType] = useState<AccountType>("establishment");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [busy, setBusy] = useState(false);
@@ -448,7 +548,7 @@ function AuthScreen({ onEnter }: { onEnter: (response: { token: string; user: Au
     const data = Object.fromEntries(new FormData(event.currentTarget));
     try {
       if (mode === "forgot") {
-        const response = await api.forgotPassword(passwordResetPayload(String(data.email)));
+        const response = await api.forgotPassword(passwordResetPayload(String(data.email), accountType));
         setSuccess(response.reset_token ? `${response.message}. Codigo: ${response.reset_token}` : response.message);
         return;
       }
@@ -459,7 +559,7 @@ function AuthScreen({ onEnter }: { onEnter: (response: { token: string; user: Au
         return;
       }
       const response = mode === "login"
-        ? await api.login({ email: String(data.email), password: String(data.password) })
+        ? await api.login(loginPayload(String(data.email), String(data.password), accountType))
         : await api.registerBarbershop({
           barbershop_name: String(data.barbershop_name),
           owner_name: String(data.owner_name),
@@ -486,6 +586,20 @@ function AuthScreen({ onEnter }: { onEnter: (response: { token: string; user: Au
           <button className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>Cadastrar barbearia</button>
         </div>
         <form className="form-grid auth-form" onSubmit={submit}>
+          {(mode === "login" || mode === "forgot") && (
+            <div className="segmented full compact-segmented" aria-label="Tipo de acesso">
+              {(["establishment", "professional"] as const).map((type) => (
+                <button
+                  className={accountType === type ? "active" : ""}
+                  key={type}
+                  onClick={() => setAccountType(type)}
+                  type="button"
+                >
+                  {accountLabel(type)}
+                </button>
+              ))}
+            </div>
+          )}
           {mode === "register" && (
             <>
               <Field name="barbershop_name" label="Nome da barbearia" required />
@@ -493,11 +607,11 @@ function AuthScreen({ onEnter }: { onEnter: (response: { token: string; user: Au
             </>
           )}
           {mode !== "reset" && (
-            <Field name="email" label="E-mail" type="email" defaultValue={mode === "login" ? "admin@example.test" : ""} required />
+            <Field name="email" label="E-mail" type="email" required />
           )}
           {mode === "reset" && <Field name="token" label="Código de recuperação" required />}
           {mode !== "forgot" && (
-            <Field name="password" label={mode === "reset" ? "Nova senha" : "Senha"} type="password" defaultValue={mode === "login" ? "TestPassword@123" : ""} required />
+            <Field name="password" label={mode === "reset" ? "Nova senha" : "Senha"} type="password" required />
           )}
           {error && <p className="form-error full">{error}</p>}
           {success && <p className="form-success full">{success}</p>}
@@ -1344,7 +1458,7 @@ function CheckoutModal({ appointment, onClose, onSaved }: { appointment: Appoint
   );
 }
 
-function ProfessionalCommissions({ barberId }: { barberId: number }) {
+function ProfessionalCommissions({ barberId, professional = false }: { barberId: number; professional?: boolean }) {
   const [commissions, setCommissions] = useState<Commission[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -1364,8 +1478,16 @@ function ProfessionalCommissions({ barberId }: { barberId: number }) {
 
   if (loading) return <div className="skeleton" />;
 
+  const summary = commissionSummary(commissions);
   return (
     <section className="grid">
+      {professional && (
+        <div className="grid cols-3">
+          <Metric label="Serviços" value={`${summary.services}`} icon="servicos" />
+          <Metric label="Média" value={`${summary.average_percent}%`} icon="grafico" />
+          <Metric label="Retorno estimado" value={money(summary.estimated_return_cents)} icon="dinheiro" />
+        </div>
+      )}
       {commissions.length === 0 ? (
         <EmptyState title="Sem comissões configuradas" body="As comissões aparecem aqui quando o salão cadastrar serviços para você." />
       ) : (

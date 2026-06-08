@@ -3,8 +3,9 @@ import test from "node:test";
 import { passwordResetPayload } from "./password-reset.ts";
 
 test("monta payload de solicitacao de reset com email normalizado", () => {
-  assert.deepEqual(passwordResetPayload("  ADMIN@BarbeariaMestre.Test  "), {
+  assert.deepEqual(passwordResetPayload("  admin@example.test  ", "establishment"), {
     email: "admin@example.test",
+    account_type: "establishment",
   });
 });
 

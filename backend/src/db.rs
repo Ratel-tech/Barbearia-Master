@@ -145,6 +145,10 @@ pub async fn seed(db: &Db) -> anyhow::Result<()> {
 }
 
 async fn seed_demo_data(db: &Db) -> anyhow::Result<()> {
+    let admin_email =
+        std::env::var("DEMO_ADMIN_EMAIL").unwrap_or_else(|_| "admin@example.test".to_string());
+    let admin_password = demo_admin_password()?;
+
     let mut tx = db.pool.begin().await?;
     sqlx::query("insert or ignore into barbershops (name, slug) values (?, ?)")
         .bind("Barbearia Mestre Teste")
@@ -155,7 +159,7 @@ async fn seed_demo_data(db: &Db) -> anyhow::Result<()> {
         sqlx::query_as("select id from barbershops where slug = 'barbearia-mestre-teste'")
             .fetch_one(&mut *tx)
             .await?;
-    let password_hash = hash_password("TestPassword@123")?;
+    let password_hash = hash_password(&admin_password)?;
     sqlx::query(
         "insert into users (barbershop_id, name, email, password_hash, role) values (?, ?, ?, ?, 'admin')
          on conflict(email) do update set
@@ -166,7 +170,7 @@ async fn seed_demo_data(db: &Db) -> anyhow::Result<()> {
     )
     .bind(barbershop_id.0)
     .bind("Administrador Teste")
-    .bind("admin@example.test")
+    .bind(admin_email)
     .bind(password_hash)
     .execute(&mut *tx)
     .await?;
@@ -180,6 +184,18 @@ fn hash_password(password: &str) -> anyhow::Result<String> {
         .hash_password(password.as_bytes(), &salt)
         .map(|hash| hash.to_string())
         .map_err(|_| anyhow::anyhow!("failed to hash seed password"))
+}
+
+fn demo_admin_password() -> anyhow::Result<String> {
+    #[cfg(test)]
+    {
+        Ok(std::env::var("DEMO_ADMIN_PASSWORD").unwrap_or_else(|_| "TestPassword@123".to_string()))
+    }
+    #[cfg(not(test))]
+    {
+        std::env::var("DEMO_ADMIN_PASSWORD")
+            .map_err(|_| anyhow::anyhow!("DEMO_ADMIN_PASSWORD must be set when SEED_DEMO_DATA=1"))
+    }
 }
 
 #[cfg(test)]

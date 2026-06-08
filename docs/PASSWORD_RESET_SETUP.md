@@ -4,12 +4,15 @@
 
 The system already supports the password reset lifecycle:
 
-1. `POST /api/auth/forgot-password` receives an e-mail.
+1. `POST /api/auth/forgot-password` receives an e-mail and `account_type`.
 2. If the account exists, the backend creates a 30-minute reset token.
 3. `POST /api/auth/reset-password` receives the token and a new password.
 4. The backend updates the password hash, marks the token as used, and invalidates existing sessions for that account.
 
-The flow works for salon admin users and active professionals because both use the same login screen.
+The flow works for salon admin users and active professionals. The selected `account_type` decides which table is checked:
+
+- `establishment`: checks `users`.
+- `professional`: checks active `barbers`.
 
 ## Delivery Still Required
 
@@ -34,7 +37,8 @@ Do not enable `PASSWORD_RESET_EXPOSE_TOKEN=1` in production.
 
 ## Frontend Entry Points
 
-- `Esqueci minha senha`: requests a recovery code for the e-mail.
+- Access selector: must match the account owner, `Estabelecimento` or `Profissional`.
+- `Esqueci minha senha`: requests a recovery code for the e-mail and selected access type.
 - `Já tenho código`: accepts the recovery code and the new password.
 
 ## Production Checklist

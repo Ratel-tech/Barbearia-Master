@@ -1,3 +1,5 @@
+import type { AccountType } from "./auth-account";
+
 const API_URL = import.meta.env?.VITE_API_URL ?? "http://127.0.0.1:8080";
 const TOKEN_KEY = "stitch_barbershop_token";
 
@@ -134,11 +136,11 @@ export const api = {
   hasToken: () => Boolean(localStorage.getItem(TOKEN_KEY)),
   setToken: (token: string) => localStorage.setItem(TOKEN_KEY, token),
   clearToken: () => localStorage.removeItem(TOKEN_KEY),
-  login: (body: { email: string; password: string }) =>
+  login: (body: { email: string; password: string; account_type: AccountType }) =>
     request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(body) }),
   registerBarbershop: (body: { barbershop_name: string; owner_name: string; email: string; password: string }) =>
     request<AuthResponse>("/api/auth/register-barbershop", { method: "POST", body: JSON.stringify(body) }),
-  forgotPassword: (body: { email: string }) =>
+  forgotPassword: (body: { email: string; account_type: AccountType }) =>
     request<PasswordResetResponse>("/api/auth/forgot-password", { method: "POST", body: JSON.stringify(body) }),
   resetPassword: (body: { token: string; password: string }) =>
     request<PasswordResetResponse>("/api/auth/reset-password", { method: "POST", body: JSON.stringify(body) }),
