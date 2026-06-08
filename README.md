@@ -1,4 +1,4 @@
-# stitch_barbershop_management_system
+# BARBEARIA MASTER
 
 Sistema de gerenciamento de barbearia baseado nos exports estaticos do Google Stitch.
 
