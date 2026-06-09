@@ -7,10 +7,12 @@ import {
   CheckCircle2,
   Clock3,
   DollarSign,
+  Download,
   Edit3,
   Menu,
   Plus,
   Scissors,
+  Share2,
   Trash2,
   TrendingUp,
   UserPlus,
@@ -35,6 +37,8 @@ import { formatMobilePhoneInput, validateClientRequiredFields } from "./client-v
 import { addMonths, buildMonthDays, monthLabel } from "./date-navigation";
 import { passwordResetPayload } from "./password-reset";
 import { commissionSummary, professionalAgendaSummary } from "./professional-portal";
+import { detectInstallPlatform, installPromptState, installText } from "./pwa-install";
+import type { InstallAction } from "./pwa-install";
 import { appointmentServices, serviceStatusLabel } from "./service-catalog";
 
 type Page = AppPage;
@@ -59,6 +63,8 @@ type IconName =
   | "carteira"
   | "sucesso"
   | "novoCliente"
+  | "instalar"
+  | "compartilhar"
   | "menu";
 
 const icons: Record<IconName, LucideIcon> = {
@@ -78,6 +84,8 @@ const icons: Record<IconName, LucideIcon> = {
   carteira: WalletCards,
   sucesso: CheckCircle2,
   novoCliente: UserPlus,
+  instalar: Download,
+  compartilhar: Share2,
   menu: Menu,
 };
 
@@ -240,23 +248,36 @@ export default function App() {
   const isBarber = auth?.role === "barber";
 
   if (!authChecked || (loading && !auth)) {
-    return <div className="auth-loading">Carregando...</div>;
+    return (
+      <>
+        <div className="auth-loading">Carregando...</div>
+        <InstallAppPrompt />
+      </>
+    );
   }
 
   if (!auth) {
-    return <AuthScreen onEnter={enter} />;
+    return (
+      <>
+        <AuthScreen onEnter={enter} />
+        <InstallAppPrompt />
+      </>
+    );
   }
 
   if (isBarber) {
     return (
-      <ProfessionalShell
-        appointments={appointments}
-        auth={auth}
-        loading={loading}
-        onLogout={logout}
-        page={page}
-        setPage={setPage}
-      />
+      <>
+        <ProfessionalShell
+          appointments={appointments}
+          auth={auth}
+          loading={loading}
+          onLogout={logout}
+          page={page}
+          setPage={setPage}
+        />
+        <InstallAppPrompt />
+      </>
     );
   }
 
@@ -445,8 +466,106 @@ export default function App() {
       {modal === "commissions" && selectedBarber && (
         <CommissionsModal barber={selectedBarber} onClose={() => setModal(null)} onSaved={() => notify("Comissao atualizada")} />
       )}
+      <InstallAppPrompt />
       {toast && <div className="toast">{toast}</div>}
     </div>
+  );
+}
+
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+};
+
+type NavigatorWithStandalone = Navigator & {
+  standalone?: boolean;
+};
+
+const installDismissedKey = "barbearia-install-dismissed";
+
+function InstallAppPrompt() {
+  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [dismissed, setDismissed] = useState(() => localStorage.getItem(installDismissedKey) === "1");
+  const [iosHelpVisible, setIosHelpVisible] = useState(false);
+  const [viewportVersion, setViewportVersion] = useState(0);
+
+  useEffect(() => {
+    const onBeforeInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      setDeferredPrompt(event as BeforeInstallPromptEvent);
+    };
+    const onInstalled = () => {
+      setDeferredPrompt(null);
+      setDismissed(true);
+    };
+    window.addEventListener("beforeinstallprompt", onBeforeInstallPrompt);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onBeforeInstallPrompt);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
+  }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 768px)");
+    const refresh = () => setViewportVersion((version) => version + 1);
+    refresh();
+    media.addEventListener("change", refresh);
+    return () => media.removeEventListener("change", refresh);
+  }, []);
+
+  const platform = detectInstallPlatform(navigator.userAgent);
+  const isStandalone = window.matchMedia("(display-mode: standalone)").matches || (navigator as NavigatorWithStandalone).standalone === true;
+  const mobile = platform !== "desktop" || window.matchMedia("(max-width: 768px)").matches;
+  const promptState = installPromptState({
+    dismissed,
+    hasNativePrompt: Boolean(deferredPrompt),
+    isStandalone,
+    mobile,
+    platform,
+  });
+
+  void viewportVersion;
+
+  const action = promptState.action;
+  if (!promptState.visible || !action) return null;
+
+  const text = installText(action);
+
+  async function install(action: InstallAction) {
+    if (action === "ios-help") {
+      setIosHelpVisible(true);
+      return;
+    }
+    if (!deferredPrompt) return;
+    await deferredPrompt.prompt();
+    const choice = await deferredPrompt.userChoice;
+    if (choice.outcome === "accepted") {
+      setDismissed(true);
+    }
+    setDeferredPrompt(null);
+  }
+
+  function dismiss() {
+    localStorage.setItem(installDismissedKey, "1");
+    setDismissed(true);
+  }
+
+  return (
+    <aside className="install-app-prompt" aria-label="Instalação do aplicativo">
+      <img src="/favicon.svg" alt="" />
+      <div>
+        <strong>{text.title}</strong>
+        <p>{iosHelpVisible ? "Toque em Compartilhar e depois em Adicionar à Tela de Início." : text.message}</p>
+      </div>
+      <button className="btn primary compact" onClick={() => install(action)}>
+        <Icon name={action === "ios-help" ? "compartilhar" : "instalar"} />
+        {text.button}
+      </button>
+      <button className="icon-button" onClick={dismiss} aria-label="Fechar instalação">
+        <Icon name="fechar" />
+      </button>
+    </aside>
   );
 }
 
@@ -1497,10 +1616,10 @@ function ProfessionalCommissions({ barberId, professional = false }: { barberId:
             <tbody>
               {commissions.map((commission) => (
                 <tr key={commission.service_id}>
-                  <td>{commission.service_name}</td>
-                  <td>{money(commission.price_cents)}</td>
-                  <td>{commission.commission_percent}%</td>
-                  <td className="price">{money(commission.estimated_return_cents)}</td>
+                  <td data-label="Serviço">{commission.service_name}</td>
+                  <td data-label="Preço">{money(commission.price_cents)}</td>
+                  <td data-label="Comissão">{commission.commission_percent}%</td>
+                  <td className="price" data-label="Retorno">{money(commission.estimated_return_cents)}</td>
                 </tr>
               ))}
             </tbody>
