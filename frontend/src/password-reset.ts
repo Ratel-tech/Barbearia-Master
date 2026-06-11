@@ -15,3 +15,7 @@ export function passwordResetPayload(emailOrToken: string, accountTypeOrPassword
     password: accountTypeOrPassword.trim(),
   };
 }
+
+export function passwordResetTokenFromSearch(search: string) {
+  return new URLSearchParams(search).get("token")?.trim() ?? "";
+}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { passwordResetPayload } from "./password-reset.ts";
+import { passwordResetPayload, passwordResetTokenFromSearch } from "./password-reset.ts";
 
 test("monta payload de solicitacao de reset com email normalizado", () => {
   assert.deepEqual(passwordResetPayload("  admin@example.test  ", "establishment"), {
@@ -14,4 +14,9 @@ test("monta payload de confirmacao de reset com token e senha", () => {
     token: "codigo-123",
     password: "NovaSenha@123",
   });
+});
+
+test("extrai codigo de recuperacao da URL", () => {
+  assert.equal(passwordResetTokenFromSearch("?token=codigo-123"), "codigo-123");
+  assert.equal(passwordResetTokenFromSearch("?x=1"), "");
 });

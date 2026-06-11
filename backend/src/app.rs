@@ -11,9 +11,13 @@ use axum::{
     routing::{get, post, put},
 };
 use chrono::{Duration, NaiveDateTime, Timelike, Utc};
+use lettre::{
+    Message, SmtpTransport, Transport, message::Mailbox,
+    transport::smtp::authentication::Credentials,
+};
 use password_hash::{PasswordHash, PasswordVerifier, SaltString, rand_core::OsRng};
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub fn router(db: Db) -> Router {
     Router::new()
@@ -152,8 +156,9 @@ async fn request_password_reset(
     Json(input): Json<PasswordResetRequest>,
 ) -> ApiResult<Json<PasswordResetResponse>> {
     let email = normalize_email(&input.email)?;
-    let reset_subject =
-        find_password_reset_subject(&db, &email, account_type(&input.account_type)?).await?;
+    let account_type = account_type(&input.account_type)?;
+    let delivery_config = password_reset_delivery_config_from_env()?;
+    let reset_subject = find_password_reset_subject(&db, &email, account_type).await?;
     let mut reset_token = None;
 
     if let Some((subject_id, subject_type)) = reset_subject {
@@ -172,6 +177,9 @@ async fn request_password_reset(
         .bind(expires_at)
         .execute(&db.pool)
         .await?;
+        if let Err(error) = deliver_password_reset_token(delivery_config, &email, &token).await {
+            tracing::error!(%email, error = %error, "failed to deliver password reset token");
+        }
         reset_token = Some(token);
     }
 
@@ -280,6 +288,165 @@ fn account_type(value: &str) -> ApiResult<AccountType> {
         "professional" => Ok(AccountType::Professional),
         _ => Err(ApiError::BadRequest("tipo de acesso invalido".into())),
     }
+}
+
+#[derive(Clone, Debug)]
+enum PasswordResetDeliveryConfig {
+    Log,
+    Smtp(SmtpPasswordResetConfig),
+}
+
+#[derive(Clone, Debug)]
+struct SmtpPasswordResetConfig {
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    from: String,
+    from_name: Option<String>,
+    public_reset_url: Option<String>,
+}
+
+fn password_reset_delivery_config_from_env() -> ApiResult<PasswordResetDeliveryConfig> {
+    password_reset_delivery_config_from_pairs(std::env::vars())
+}
+
+fn password_reset_delivery_config_from_pairs<I, K, V>(
+    pairs: I,
+) -> ApiResult<PasswordResetDeliveryConfig>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    let values: HashMap<String, String> = pairs
+        .into_iter()
+        .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
+        .collect();
+    let delivery = env_value(&values, "PASSWORD_RESET_DELIVERY")
+        .unwrap_or_else(|| "log".to_string())
+        .to_ascii_lowercase();
+
+    match delivery.as_str() {
+        "log" | "none" | "disabled" => Ok(PasswordResetDeliveryConfig::Log),
+        "smtp" => {
+            let host = required_reset_env(&values, "SMTP_HOST")?;
+            let username = required_reset_env(&values, "SMTP_USERNAME")?;
+            let password = required_reset_env(&values, "SMTP_PASSWORD")?;
+            let from = required_reset_env(&values, "SMTP_FROM")?;
+            let port = env_value(&values, "SMTP_PORT")
+                .unwrap_or_else(|| "587".to_string())
+                .parse::<u16>()
+                .map_err(|_| ApiError::BadRequest("SMTP_PORT invalido".into()))?;
+
+            Ok(PasswordResetDeliveryConfig::Smtp(SmtpPasswordResetConfig {
+                host,
+                port,
+                username,
+                password,
+                from,
+                from_name: env_value(&values, "SMTP_FROM_NAME"),
+                public_reset_url: env_value(&values, "PASSWORD_RESET_PUBLIC_URL"),
+            }))
+        }
+        _ => Err(ApiError::BadRequest(
+            "PASSWORD_RESET_DELIVERY deve ser log ou smtp".into(),
+        )),
+    }
+}
+
+fn env_value(values: &HashMap<String, String>, key: &str) -> Option<String> {
+    values
+        .get(key)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn required_reset_env(values: &HashMap<String, String>, key: &str) -> ApiResult<String> {
+    env_value(values, key)
+        .ok_or_else(|| ApiError::BadRequest(format!("configuracao SMTP ausente: {key}")))
+}
+
+async fn deliver_password_reset_token(
+    config: PasswordResetDeliveryConfig,
+    email: &str,
+    token: &str,
+) -> ApiResult<()> {
+    match config {
+        PasswordResetDeliveryConfig::Log => {
+            tracing::info!(%email, "password reset token generated");
+            Ok(())
+        }
+        PasswordResetDeliveryConfig::Smtp(config) => {
+            let email = email.to_string();
+            let token = token.to_string();
+            tokio::task::spawn_blocking(move || send_password_reset_email(config, &email, &token))
+                .await
+                .map_err(|_| ApiError::BadRequest("falha ao enviar email de recuperacao".into()))?
+        }
+    }
+}
+
+fn send_password_reset_email(
+    config: SmtpPasswordResetConfig,
+    email: &str,
+    token: &str,
+) -> ApiResult<()> {
+    let from = if let Some(name) = &config.from_name {
+        Mailbox::new(
+            Some(name.clone()),
+            config
+                .from
+                .parse()
+                .map_err(|_| ApiError::BadRequest("SMTP_FROM invalido".into()))?,
+        )
+    } else {
+        config
+            .from
+            .parse()
+            .map_err(|_| ApiError::BadRequest("SMTP_FROM invalido".into()))?
+    };
+    let to: Mailbox = email
+        .parse()
+        .map_err(|_| ApiError::BadRequest("email invalido".into()))?;
+    let message = Message::builder()
+        .from(from)
+        .to(to)
+        .subject("Codigo de recuperacao - Barbearia Mestre")
+        .body(password_reset_email_body(
+            token,
+            config.public_reset_url.as_deref(),
+        ))
+        .map_err(|_| ApiError::BadRequest("email de recuperacao invalido".into()))?;
+
+    let credentials = Credentials::new(config.username, config.password);
+    let mailer = SmtpTransport::relay(&config.host)
+        .map_err(|_| ApiError::BadRequest("SMTP_HOST invalido".into()))?
+        .port(config.port)
+        .credentials(credentials)
+        .build();
+    mailer
+        .send(&message)
+        .map_err(|_| ApiError::BadRequest("falha ao enviar email de recuperacao".into()))?;
+    Ok(())
+}
+
+fn password_reset_email_body(token: &str, public_reset_url: Option<&str>) -> String {
+    let mut body = format!(
+        "Recebemos uma solicitacao para redefinir sua senha no Barbearia Mestre.\n\nCodigo de recuperacao: {token}\n\nEsse codigo expira em 30 minutos. Se voce nao solicitou, ignore esta mensagem."
+    );
+    if let Some(public_reset_url) = public_reset_url {
+        let separator = if public_reset_url.contains('?') {
+            "&"
+        } else {
+            "?"
+        };
+        body.push_str(&format!(
+            "\n\nLink de recuperacao: {public_reset_url}{separator}token={token}"
+        ));
+    }
+    body
 }
 
 fn password_reset_response(reset_token: Option<String>) -> PasswordResetResponse {
@@ -2025,6 +2192,27 @@ mod tests {
         .unwrap();
         assert_eq!(stored.0, "barber");
         assert_eq!(stored.1, barber.id);
+    }
+
+    #[test]
+    fn smtp_password_reset_delivery_requires_production_settings() {
+        let result = super::password_reset_delivery_config_from_pairs([
+            ("PASSWORD_RESET_DELIVERY", "smtp"),
+            ("SMTP_HOST", "smtp.example.test"),
+            ("SMTP_USERNAME", "mailer@example.test"),
+            ("SMTP_PASSWORD", "secret"),
+        ]);
+
+        assert!(matches!(result, Err(ApiError::BadRequest(_))));
+    }
+
+    #[test]
+    fn password_reset_email_includes_code_and_optional_link() {
+        let body =
+            super::password_reset_email_body("123456-token", Some("https://app.example.test/reset"));
+
+        assert!(body.contains("123456-token"));
+        assert!(body.contains("https://app.example.test/reset?token=123456-token"));
     }
 
     async fn create_client_for(db: &Db, headers: HeaderMap, name: &str) -> Client {

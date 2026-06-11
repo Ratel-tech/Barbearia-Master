@@ -35,7 +35,7 @@ import type { CheckoutPaymentDraft } from "./checkout-payments";
 import { clientDraftFromSearch, clientSearchMatches } from "./client-search";
 import { formatMobilePhoneInput, validateClientRequiredFields } from "./client-validation";
 import { addMonths, buildMonthDays, monthLabel } from "./date-navigation";
-import { passwordResetPayload } from "./password-reset";
+import { passwordResetPayload, passwordResetTokenFromSearch } from "./password-reset";
 import { commissionSummary, professionalAgendaSummary } from "./professional-portal";
 import { detectInstallPlatform, installPromptState, installText } from "./pwa-install";
 import type { InstallAction } from "./pwa-install";
@@ -653,7 +653,8 @@ function formatTime(value: string) {
 }
 
 function AuthScreen({ onEnter }: { onEnter: (response: { token: string; user: AuthUser }) => Promise<void> }) {
-  const [mode, setMode] = useState<"login" | "register" | "forgot" | "reset">("login");
+  const initialResetToken = passwordResetTokenFromSearch(window.location.search);
+  const [mode, setMode] = useState<"login" | "register" | "forgot" | "reset">(initialResetToken ? "reset" : "login");
   const [accountType, setAccountType] = useState<AccountType>("establishment");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -728,7 +729,7 @@ function AuthScreen({ onEnter }: { onEnter: (response: { token: string; user: Au
           {mode !== "reset" && (
             <Field name="email" label="E-mail" type="email" required />
           )}
-          {mode === "reset" && <Field name="token" label="Código de recuperação" required />}
+          {mode === "reset" && <Field name="token" label="Código de recuperação" defaultValue={initialResetToken} required />}
           {mode !== "forgot" && (
             <Field name="password" label={mode === "reset" ? "Nova senha" : "Senha"} type="password" required />
           )}
