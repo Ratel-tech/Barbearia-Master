@@ -102,6 +102,36 @@ export type CheckoutPaymentInput = {
   amount_cents: number;
 };
 
+export type ParsedApiError = {
+  message: string;
+  status: number;
+  challengeRequired: boolean;
+  captchaProvider?: string;
+  captchaSiteKey?: string;
+  action?: string;
+  retryAfterSeconds?: number;
+};
+
+export class ApiRequestError extends Error {
+  status: number;
+  challengeRequired: boolean;
+  captchaProvider?: string;
+  captchaSiteKey?: string;
+  action?: string;
+  retryAfterSeconds?: number;
+
+  constructor(error: ParsedApiError) {
+    super(error.message);
+    this.name = "ApiRequestError";
+    this.status = error.status;
+    this.challengeRequired = error.challengeRequired;
+    this.captchaProvider = error.captchaProvider;
+    this.captchaSiteKey = error.captchaSiteKey;
+    this.action = error.action;
+    this.retryAfterSeconds = error.retryAfterSeconds;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = localStorage.getItem(TOKEN_KEY);
   const response = await fetch(`${API_URL}${path}`, {
@@ -114,33 +144,62 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(apiErrorMessage(response.status, text));
+    throw parseApiError(response.status, text);
   }
   return response.json() as Promise<T>;
 }
 
 export function apiErrorMessage(status: number, text: string) {
-  if (text) {
-    try {
-      const parsed = JSON.parse(text) as { error?: unknown };
-      if (typeof parsed.error === "string") return parsed.error;
-    } catch {
-      return text;
-    }
-    return text;
+  return parseApiError(status, text).message;
+}
+
+export function parseApiError(status: number, text: string): ApiRequestError {
+  const fallbackMessage = text || `HTTP ${status}`;
+  if (!text) {
+    return new ApiRequestError({
+      message: fallbackMessage,
+      status,
+      challengeRequired: false,
+    });
   }
-  return `HTTP ${status}`;
+
+  try {
+    const parsed = JSON.parse(text) as {
+      error?: unknown;
+      challenge_required?: unknown;
+      captcha_provider?: unknown;
+      captcha_site_key?: unknown;
+      action?: unknown;
+      retry_after_seconds?: unknown;
+    };
+    const challengeRequired = parsed.challenge_required === true;
+    return new ApiRequestError({
+      message: typeof parsed.error === "string" ? parsed.error : fallbackMessage,
+      status,
+      challengeRequired,
+      captchaProvider: typeof parsed.captcha_provider === "string" ? parsed.captcha_provider : undefined,
+      captchaSiteKey: typeof parsed.captcha_site_key === "string" ? parsed.captcha_site_key : undefined,
+      action: typeof parsed.action === "string" ? parsed.action : undefined,
+      retryAfterSeconds: typeof parsed.retry_after_seconds === "number" ? parsed.retry_after_seconds : undefined,
+    });
+  } catch {
+    return new ApiRequestError({
+      message: fallbackMessage,
+      status,
+      challengeRequired: false,
+    });
+  }
 }
 
 export const api = {
   hasToken: () => Boolean(localStorage.getItem(TOKEN_KEY)),
   setToken: (token: string) => localStorage.setItem(TOKEN_KEY, token),
   clearToken: () => localStorage.removeItem(TOKEN_KEY),
-  login: (body: { email: string; password: string; account_type: AccountType }) =>
+  login: (body: { email: string; password: string; account_type: AccountType; captcha_token?: string }) =>
     request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(body) }),
   registerBarbershop: (body: { barbershop_name: string; owner_name: string; email: string; password: string }) =>
     request<AuthResponse>("/api/auth/register-barbershop", { method: "POST", body: JSON.stringify(body) }),
-  forgotPassword: (body: { email: string; account_type: AccountType }) =>
+  forgotPassword: (body: { email: string; account_type: AccountType; captcha_token?: string }) =>
     request<PasswordResetResponse>("/api/auth/forgot-password", { method: "POST", body: JSON.stringify(body) }),
   resetPassword: (body: { token: string; password: string }) =>
     request<PasswordResetResponse>("/api/auth/reset-password", { method: "POST", body: JSON.stringify(body) }),

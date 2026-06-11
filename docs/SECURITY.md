@@ -9,6 +9,7 @@
 - Tratamento de erro centralizado sem expor stack traces.
 - Valores monetarios inteiros em centavos.
 - Soft delete preparado em clientes e profissionais.
+- Protecao de login e recuperacao de senha com hCaptcha apos tentativas repetidas.
 
 ## Proximos endurecimentos antes de producao
 

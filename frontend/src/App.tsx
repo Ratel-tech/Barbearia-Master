@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
   Badge,
@@ -21,7 +21,7 @@ import {
   X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { api } from "./api";
+import { api, ApiRequestError } from "./api";
 import type { Appointment, AuthUser, Barber, Client, Commission, ExtraExpense, Overview, Service } from "./api";
 import { appointmentStatusClass, canCheckoutAppointment, canEditAppointment } from "./appointment-status";
 import { accountLabel, loginPayload } from "./auth-account";
@@ -39,6 +39,7 @@ import { passwordResetPayload, passwordResetTokenFromSearch } from "./password-r
 import { commissionSummary, professionalAgendaSummary } from "./professional-portal";
 import { detectInstallPlatform, installPromptState, installText } from "./pwa-install";
 import type { InstallAction } from "./pwa-install";
+import { loadHcaptcha } from "./hcaptcha";
 import { appointmentServices, serviceStatusLabel } from "./service-catalog";
 
 type Page = AppPage;
@@ -656,6 +657,13 @@ function formatTime(value: string) {
   return value.slice(11, 16);
 }
 
+type CaptchaChallenge = {
+  action: "login" | "forgot";
+  message: string;
+  captchaSiteKey: string;
+  retryAfterSeconds?: number;
+};
+
 function AuthScreen({ onEnter }: { onEnter: (response: { token: string; user: AuthUser }) => Promise<void> }) {
   const initialResetToken = passwordResetTokenFromSearch(window.location.search);
   const [mode, setMode] = useState<"login" | "register" | "forgot" | "reset">(initialResetToken ? "reset" : "login");
@@ -663,27 +671,39 @@ function AuthScreen({ onEnter }: { onEnter: (response: { token: string; user: Au
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [busy, setBusy] = useState(false);
+  const [captchaChallenge, setCaptchaChallenge] = useState<CaptchaChallenge | null>(null);
+  const formRef = useRef<HTMLFormElement | null>(null);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function openMode(nextMode: typeof mode) {
+    setMode(nextMode);
+    setError("");
+    setSuccess("");
+    setCaptchaChallenge(null);
+  }
+
+  async function submitWithCaptcha(captchaToken?: string) {
+    const form = formRef.current;
+    if (!form) return;
     setBusy(true);
     setError("");
     setSuccess("");
-    const data = Object.fromEntries(new FormData(event.currentTarget));
     try {
+      const data = Object.fromEntries(new FormData(form));
       if (mode === "forgot") {
-        const response = await api.forgotPassword(passwordResetPayload(String(data.email), accountType));
+        const response = await api.forgotPassword(passwordResetPayload(String(data.email), accountType, captchaToken));
         setSuccess(response.reset_token ? `${response.message}. Codigo: ${response.reset_token}` : response.message);
+        setCaptchaChallenge(null);
         return;
       }
       if (mode === "reset") {
         const response = await api.resetPassword(passwordResetPayload(String(data.token), String(data.password)));
         setSuccess(response.message);
         setMode("login");
+        setCaptchaChallenge(null);
         return;
       }
       const response = mode === "login"
-        ? await api.login(loginPayload(String(data.email), String(data.password), accountType))
+        ? await api.login(loginPayload(String(data.email), String(data.password), accountType, captchaToken))
         : await api.registerBarbershop({
           barbershop_name: String(data.barbershop_name),
           owner_name: String(data.owner_name),
@@ -691,11 +711,27 @@ function AuthScreen({ onEnter }: { onEnter: (response: { token: string; user: Au
           password: String(data.password),
         });
       await onEnter(response);
+      setCaptchaChallenge(null);
     } catch (caught) {
+      if (caught instanceof ApiRequestError && caught.challengeRequired && (mode === "login" || mode === "forgot")) {
+        setCaptchaChallenge({
+          action: caught.action === "password-reset" ? "forgot" : "login",
+          message: caught.message,
+          captchaSiteKey: caught.captchaSiteKey ?? "",
+          retryAfterSeconds: caught.retryAfterSeconds,
+        });
+        return;
+      }
       setError((caught as Error).message);
     } finally {
       setBusy(false);
     }
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    formRef.current = event.currentTarget;
+    await submitWithCaptcha();
   }
 
   return (
@@ -706,10 +742,10 @@ function AuthScreen({ onEnter }: { onEnter: (response: { token: string; user: Au
           <p>Gestão de Elite</p>
         </div>
         <div className="segmented">
-          <button className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Entrar</button>
-          <button className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>Cadastrar barbearia</button>
+          <button type="button" className={mode === "login" ? "active" : ""} onClick={() => openMode("login")}>Entrar</button>
+          <button type="button" className={mode === "register" ? "active" : ""} onClick={() => openMode("register")}>Cadastrar barbearia</button>
         </div>
-        <form className="form-grid auth-form" onSubmit={submit}>
+        <form ref={formRef} className="form-grid auth-form" onSubmit={submit}>
           {(mode === "login" || mode === "forgot") && (
             <div className="segmented full compact-segmented" aria-label="Tipo de acesso">
               {(["establishment", "professional"] as const).map((type) => (
@@ -741,13 +777,106 @@ function AuthScreen({ onEnter }: { onEnter: (response: { token: string; user: Au
           {success && <p className="form-success full">{success}</p>}
           <button className="btn primary full" disabled={busy}>{busy ? "Validando..." : authSubmitLabel(mode)}</button>
           <div className="auth-links full">
-            {mode === "login" && <button type="button" onClick={() => setMode("forgot")}>Esqueci minha senha</button>}
-            {mode === "forgot" && <button type="button" onClick={() => setMode("reset")}>Já tenho código</button>}
-            {(mode === "forgot" || mode === "reset") && <button type="button" onClick={() => setMode("login")}>Voltar para entrar</button>}
+            {mode === "login" && <button type="button" onClick={() => openMode("forgot")}>Esqueci minha senha</button>}
+            {mode === "forgot" && <button type="button" onClick={() => openMode("reset")}>Já tenho código</button>}
+            {(mode === "forgot" || mode === "reset") && <button type="button" onClick={() => openMode("login")}>Voltar para entrar</button>}
           </div>
         </form>
       </section>
+      {captchaChallenge && (mode === "login" || mode === "forgot") && (
+        <CaptchaChallengeModal
+          challenge={captchaChallenge}
+          onCancel={() => setCaptchaChallenge(null)}
+          onToken={(token) => {
+            setCaptchaChallenge(null);
+            void submitWithCaptcha(token);
+          }}
+        />
+      )}
     </main>
+  );
+}
+
+function CaptchaChallengeModal({
+  challenge,
+  onCancel,
+  onToken,
+}: {
+  challenge: CaptchaChallenge;
+  onCancel: () => void;
+  onToken: (token: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const widgetIdRef = useRef<number | null>(null);
+  const onTokenRef = useRef(onToken);
+  const [loading, setLoading] = useState(true);
+  const [widgetError, setWidgetError] = useState("");
+
+  useEffect(() => {
+    onTokenRef.current = onToken;
+  }, [onToken]);
+
+  useEffect(() => {
+    let active = true;
+    widgetIdRef.current = null;
+
+    async function mount() {
+      try {
+        const hcaptcha = await loadHcaptcha();
+        if (!active || !containerRef.current) return;
+        widgetIdRef.current = hcaptcha.render(containerRef.current, {
+          sitekey: challenge.captchaSiteKey,
+          theme: "dark",
+          size: "normal",
+          callback: (token: string) => {
+            onTokenRef.current(token);
+          },
+          "expired-callback": () => {
+            if (active) {
+              setWidgetError("O desafio expirou. Gere um novo desafio.");
+            }
+          },
+          "error-callback": () => {
+            if (active) {
+              setWidgetError("Nao foi possivel carregar o hCaptcha.");
+            }
+          },
+        });
+        if (active) setLoading(false);
+      } catch (caught) {
+        if (active) {
+          setWidgetError((caught as Error).message);
+          setLoading(false);
+        }
+      }
+    }
+
+    void mount();
+    return () => {
+      active = false;
+      const hcaptcha = window.hcaptcha;
+      if (hcaptcha && widgetIdRef.current != null) {
+        hcaptcha.remove?.(widgetIdRef.current);
+      }
+    };
+  }, [challenge.captchaSiteKey]);
+
+  return (
+    <Modal title="Verificação humana" onClose={onCancel} large>
+      <div className="captcha-challenge">
+        <p className="eyebrow">Proteção anti-brute force</p>
+        <h3>Valide para continuar</h3>
+        <p className="captcha-message">{challenge.message}</p>
+        {challenge.retryAfterSeconds !== undefined && (
+          <p className="captcha-hint">
+            O acesso volta a ser liberado após {Math.max(challenge.retryAfterSeconds, 0)} segundos, se o desafio não for concluído.
+          </p>
+        )}
+        <div className="captcha-widget" ref={containerRef} />
+        {loading && <p className="captcha-hint">Carregando hCaptcha...</p>}
+        {widgetError && <p className="form-error">{widgetError}</p>}
+      </div>
+    </Modal>
   );
 }
 

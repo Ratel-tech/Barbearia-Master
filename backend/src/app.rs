@@ -1,4 +1,8 @@
 use crate::{
+    auth_protection::{
+        clear_auth_attempts, challenge_required_error, current_auth_challenge, record_auth_failure,
+        verify_hcaptcha, AuthChallengeAction,
+    },
     db::Db,
     error::{ApiError, ApiResult},
     models::*,
@@ -59,6 +63,7 @@ struct LoginRequest {
     email: String,
     password: String,
     account_type: String,
+    captcha_token: Option<String>,
 }
 
 async fn register_barbershop(
@@ -106,7 +111,20 @@ async fn login(
         return Err(ApiError::BadRequest("credenciais invalidas".into()));
     }
 
-    match account_type(&payload.account_type)? {
+    let challenge_state =
+        current_auth_challenge(&db, AuthChallengeAction::Login, &payload.account_type, &email)
+            .await?;
+    if challenge_state.required {
+        let captcha_token = payload.captcha_token.as_deref().ok_or_else(|| {
+            challenge_required_error(
+                AuthChallengeAction::Login,
+                challenge_state.retry_after_seconds.unwrap_or(900),
+            )
+        })?;
+        verify_hcaptcha(captcha_token).await?;
+    }
+
+    let auth_result = match account_type(&payload.account_type)? {
         AccountType::Establishment => {
             if let Some(row) = sqlx::query_as::<_, (i64, String, String, String, String, i64)>(
                 "select id, name, email, password_hash, role, barbershop_id from users where lower(email) = ?",
@@ -119,8 +137,12 @@ async fn login(
                 if verify_password(&payload.password, &password_hash) {
                     let token = create_session(&db, id, "user", barbershop_id, &role, None).await?;
                     let user = auth_identity_from_token(&db, &token).await?;
-                    return Ok(Json(AuthResponse { token, user }));
+                    Some(Json(AuthResponse { token, user }))
+                } else {
+                    None
                 }
+            } else {
+                None
             }
         }
         AccountType::Professional => {
@@ -138,10 +160,41 @@ async fn login(
                     let token =
                         create_session(&db, id, "barber", barbershop_id, "barber", Some(id)).await?;
                     let user = auth_identity_from_token(&db, &token).await?;
-                    return Ok(Json(AuthResponse { token, user }));
+                    Some(Json(AuthResponse { token, user }))
+                } else {
+                    None
                 }
+            } else {
+                None
             }
         }
+    };
+
+    if let Some(response) = auth_result {
+        clear_auth_attempts(
+            &db,
+            AuthChallengeAction::Login,
+            &payload.account_type,
+            &email,
+        )
+        .await?;
+        return Ok(response);
+    }
+
+    let failure_state = record_auth_failure(
+        &db,
+        AuthChallengeAction::Login,
+        &payload.account_type,
+        &email,
+    )
+    .await?;
+    if challenge_state.required || failure_state.required {
+        return Err(challenge_required_error(
+            AuthChallengeAction::Login,
+            failure_state
+                .retry_after_seconds
+                .unwrap_or(challenge_state.retry_after_seconds.unwrap_or(900)),
+        ));
     }
 
     Err(ApiError::Unauthorized)
@@ -156,6 +209,22 @@ async fn request_password_reset(
     Json(input): Json<PasswordResetRequest>,
 ) -> ApiResult<Json<PasswordResetResponse>> {
     let email = normalize_email(&input.email)?;
+    let challenge_state = current_auth_challenge(
+        &db,
+        AuthChallengeAction::PasswordReset,
+        &input.account_type,
+        &email,
+    )
+    .await?;
+    if challenge_state.required {
+        let captcha_token = input.captcha_token.as_deref().ok_or_else(|| {
+            challenge_required_error(
+                AuthChallengeAction::PasswordReset,
+                challenge_state.retry_after_seconds.unwrap_or(900),
+            )
+        })?;
+        verify_hcaptcha(captcha_token).await?;
+    }
     let account_type = account_type(&input.account_type)?;
     let delivery_config = password_reset_delivery_config_from_env()?;
     let reset_subject = find_password_reset_subject(&db, &email, account_type).await?;
@@ -180,7 +249,30 @@ async fn request_password_reset(
         if let Err(error) = deliver_password_reset_token(delivery_config, &email, &token).await {
             tracing::error!(%email, error = %error, "failed to deliver password reset token");
         }
+        clear_auth_attempts(
+            &db,
+            AuthChallengeAction::PasswordReset,
+            &input.account_type,
+            &email,
+        )
+        .await?;
         reset_token = Some(token);
+    } else {
+        let failure_state = record_auth_failure(
+            &db,
+            AuthChallengeAction::PasswordReset,
+            &input.account_type,
+            &email,
+        )
+        .await?;
+        if challenge_state.required || failure_state.required {
+            return Err(challenge_required_error(
+                AuthChallengeAction::PasswordReset,
+                failure_state
+                    .retry_after_seconds
+                    .unwrap_or(challenge_state.retry_after_seconds.unwrap_or(900)),
+            ));
+        }
     }
 
     Ok(Json(password_reset_response(reset_token)))
@@ -2013,6 +2105,7 @@ mod tests {
             Json(PasswordResetRequest {
                 email: email.clone(),
                 account_type: "establishment".to_string(),
+                captcha_token: None,
             }),
         )
         .await
@@ -2037,6 +2130,7 @@ mod tests {
                 email: email.clone(),
                 password: "TestPassword@123".to_string(),
                 account_type: "establishment".to_string(),
+                captcha_token: None,
             }),
         )
         .await;
@@ -2048,6 +2142,7 @@ mod tests {
                 email,
                 password: "NovaSenha@123".to_string(),
                 account_type: "establishment".to_string(),
+                captcha_token: None,
             }),
         )
         .await;
@@ -2073,6 +2168,7 @@ mod tests {
             Json(PasswordResetRequest {
                 email: "nao-existe@teste.local".to_string(),
                 account_type: "establishment".to_string(),
+                captcha_token: None,
             }),
         )
         .await
@@ -2084,6 +2180,80 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tokens.0, 0);
+    }
+
+    #[tokio::test]
+    async fn login_requires_hcaptcha_after_repeated_failures() {
+        let db = test_db().await;
+        let email = format!("challenge-login-{}@teste.local", uuid::Uuid::new_v4());
+        let _ = super::register_barbershop(
+            State(db.clone()),
+            Json(RegisterBarbershop {
+                barbershop_name: "Barbearia Challenge".to_string(),
+                owner_name: "Administrador".to_string(),
+                email: email.clone(),
+                password: "TestPassword@123".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        for _ in 0..4 {
+            let result = super::login(
+                State(db.clone()),
+                Json(LoginRequest {
+                    email: email.clone(),
+                    password: "senha-incorreta".to_string(),
+                    account_type: "establishment".to_string(),
+                    captcha_token: None,
+                }),
+            )
+            .await;
+            assert!(matches!(result, Err(ApiError::Unauthorized)));
+        }
+
+        let challenge = super::login(
+            State(db),
+            Json(LoginRequest {
+                email,
+                password: "senha-incorreta".to_string(),
+                account_type: "establishment".to_string(),
+                captcha_token: None,
+            }),
+        )
+        .await;
+        assert!(matches!(challenge, Err(ApiError::ChallengeRequired(response)) if response.challenge_required && response.captcha_provider == "hcaptcha"));
+    }
+
+    #[tokio::test]
+    async fn password_reset_requires_hcaptcha_after_repeated_unknown_email_attempts() {
+        let db = test_db().await;
+        let email = format!("challenge-reset-{}@teste.local", uuid::Uuid::new_v4());
+
+        for _ in 0..4 {
+            let response = super::request_password_reset(
+                State(db.clone()),
+                Json(PasswordResetRequest {
+                    email: email.clone(),
+                    account_type: "establishment".to_string(),
+                    captcha_token: None,
+                }),
+            )
+            .await
+            .unwrap();
+            assert!(response.reset_token.is_none());
+        }
+
+        let challenge = super::request_password_reset(
+            State(db),
+            Json(PasswordResetRequest {
+                email,
+                account_type: "establishment".to_string(),
+                captcha_token: None,
+            }),
+        )
+        .await;
+        assert!(matches!(challenge, Err(ApiError::ChallengeRequired(response)) if response.challenge_required && response.captcha_provider == "hcaptcha"));
     }
 
     #[tokio::test]
@@ -2111,6 +2281,7 @@ mod tests {
                 email: admin_email.clone(),
                 password: "TestPassword@123".to_string(),
                 account_type: "establishment".to_string(),
+                captcha_token: None,
             }),
         )
         .await
@@ -2124,6 +2295,7 @@ mod tests {
                 email: barber_email.clone(),
                 password: "TestPassword@123".to_string(),
                 account_type: "professional".to_string(),
+                captcha_token: None,
             }),
         )
         .await
@@ -2137,6 +2309,7 @@ mod tests {
                 email: admin_email,
                 password: "TestPassword@123".to_string(),
                 account_type: "professional".to_string(),
+                captcha_token: None,
             }),
         )
         .await;
@@ -2148,6 +2321,7 @@ mod tests {
                 email: barber_email,
                 password: "TestPassword@123".to_string(),
                 account_type: "establishment".to_string(),
+                captcha_token: None,
             }),
         )
         .await;
@@ -2166,6 +2340,7 @@ mod tests {
             Json(PasswordResetRequest {
                 email: barber_email.clone(),
                 account_type: "establishment".to_string(),
+                captcha_token: None,
             }),
         )
         .await
@@ -2177,6 +2352,7 @@ mod tests {
             Json(PasswordResetRequest {
                 email: barber_email,
                 account_type: "professional".to_string(),
+                captcha_token: None,
             }),
         )
         .await
@@ -2719,6 +2895,7 @@ mod tests {
                 email: email.to_string(),
                 password: "TestPassword@123".to_string(),
                 account_type: "professional".to_string(),
+                captcha_token: None,
             }),
         )
         .await

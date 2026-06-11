@@ -141,6 +141,15 @@ create table if not exists password_reset_tokens (
     created_at text not null default current_timestamp
 );
 
+create table if not exists auth_challenge_attempts (
+    scope text not null,
+    identifier text not null,
+    failures integer not null default 0,
+    locked_until text,
+    last_failed_at text not null default current_timestamp,
+    primary key (scope, identifier)
+);
+
 create index if not exists idx_users_barbershop_email on users(barbershop_id, email);
 create index if not exists idx_clients_name on clients(name);
 create index if not exists idx_clients_barbershop on clients(barbershop_id);
@@ -158,3 +167,4 @@ create index if not exists idx_payments_created_at on payments(created_at);
 create index if not exists idx_payment_splits_payment on payment_splits(payment_id);
 create index if not exists idx_extra_expenses_created_at on extra_expenses(created_at);
 create index if not exists idx_password_reset_tokens_subject on password_reset_tokens(subject_type, subject_id, used_at);
+create index if not exists idx_auth_challenge_attempts_locked_until on auth_challenge_attempts(locked_until);

@@ -12,6 +12,8 @@ pub enum ApiError {
     NotFound,
     #[error("dados invalidos: {0}")]
     BadRequest(String),
+    #[error("validacao humana necessaria")]
+    ChallengeRequired(ChallengeRequiredResponse),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
@@ -24,12 +26,24 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::ChallengeRequired(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        let body = Json(json!({
-            "error": user_facing_error.to_string(),
-            "status": status.as_u16()
-        }));
+        let body = match &user_facing_error {
+            ApiError::ChallengeRequired(details) => Json(json!({
+                "error": user_facing_error.to_string(),
+                "status": status.as_u16(),
+                "challenge_required": true,
+                "captcha_provider": details.captcha_provider,
+                "captcha_site_key": details.captcha_site_key,
+                "action": details.action,
+                "retry_after_seconds": details.retry_after_seconds,
+            })),
+            _ => Json(json!({
+                "error": user_facing_error.to_string(),
+                "status": status.as_u16()
+            })),
+        };
         (status, body).into_response()
     }
 }
@@ -45,6 +59,30 @@ impl ApiError {
             other => other,
         }
     }
+
+    pub fn challenge_required(action: impl Into<String>, retry_after_seconds: i64) -> Self {
+        Self::ChallengeRequired(ChallengeRequiredResponse {
+            challenge_required: true,
+            captcha_provider: "hcaptcha",
+            captcha_site_key: captcha_site_key_from_env(),
+            action: action.into(),
+            retry_after_seconds,
+        })
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChallengeRequiredResponse {
+    pub challenge_required: bool,
+    pub captcha_provider: &'static str,
+    pub captcha_site_key: String,
+    pub action: String,
+    pub retry_after_seconds: i64,
+}
+
+fn captcha_site_key_from_env() -> String {
+    std::env::var("HCAPTCHA_SITE_KEY")
+        .unwrap_or_else(|_| "10000000-ffff-ffff-ffff-000000000001".to_string())
 }
 
 fn is_unique_constraint_error(error: &sqlx::Error) -> bool {

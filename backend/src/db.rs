@@ -148,6 +148,10 @@ async fn seed_demo_data(db: &Db) -> anyhow::Result<()> {
     let admin_email =
         std::env::var("DEMO_ADMIN_EMAIL").unwrap_or_else(|_| "admin@example.test".to_string());
     let admin_password = demo_admin_password()?;
+    let barber_email =
+        std::env::var("DEMO_BARBER_EMAIL").unwrap_or_else(|_| "barber@example.test".to_string());
+    let barber_password = std::env::var("DEMO_BARBER_PASSWORD")
+        .unwrap_or_else(|_| "BarberTest@123".to_string());
 
     let mut tx = db.pool.begin().await?;
     sqlx::query("insert or ignore into barbershops (name, slug) values (?, ?)")
@@ -172,6 +176,74 @@ async fn seed_demo_data(db: &Db) -> anyhow::Result<()> {
     .bind("Administrador Teste")
     .bind(admin_email)
     .bind(password_hash)
+    .execute(&mut *tx)
+    .await?;
+
+    let barber_password_hash = hash_password(&barber_password)?;
+    sqlx::query(
+        "insert into barbers (barbershop_id, name, document, email, password_hash, specialty, status)
+         values (?, ?, ?, ?, ?, ?, 'active')
+         on conflict do update set
+            barbershop_id = excluded.barbershop_id,
+            name = excluded.name,
+            document = excluded.document,
+            password_hash = excluded.password_hash,
+            specialty = excluded.specialty,
+            status = excluded.status,
+            deleted_at = null",
+    )
+    .bind(barbershop_id.0)
+    .bind("Barbeiro Teste")
+    .bind("00000000000")
+    .bind(&barber_email)
+    .bind(barber_password_hash)
+    .bind("Fade")
+    .execute(&mut *tx)
+    .await?;
+
+    let demo_service_exists: (i64,) = sqlx::query_as(
+        "select count(*) from services where barbershop_id = ? and name = ?",
+    )
+    .bind(barbershop_id.0)
+    .bind("Corte Demo")
+    .fetch_one(&mut *tx)
+    .await?;
+    if demo_service_exists.0 == 0 {
+        sqlx::query(
+            "insert into services (barbershop_id, name, description, duration_minutes, price_cents, category, active)
+             values (?, ?, ?, ?, ?, ?, 1)",
+        )
+        .bind(barbershop_id.0)
+        .bind("Corte Demo")
+        .bind("Serviço de demonstração para o barbeiro de teste")
+        .bind(30)
+        .bind(5_000)
+        .bind("corte")
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let barber_id: (i64,) = sqlx::query_as(
+        "select id from barbers where barbershop_id = ? and lower(email) = lower(?) and deleted_at is null limit 1",
+    )
+    .bind(barbershop_id.0)
+    .bind(&barber_email)
+    .fetch_one(&mut *tx)
+    .await?;
+    let service_id: (i64,) = sqlx::query_as(
+        "select id from services where barbershop_id = ? and name = ? limit 1",
+    )
+    .bind(barbershop_id.0)
+    .bind("Corte Demo")
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        "insert into barber_service_commissions (barber_id, service_id, commission_percent)
+         values (?, ?, 50)
+         on conflict(barber_id, service_id) do update set commission_percent = excluded.commission_percent",
+    )
+    .bind(barber_id.0)
+    .bind(service_id.0)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

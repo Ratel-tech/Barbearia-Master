@@ -9,6 +9,7 @@ argon2 = "0.5"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "native-tls", "pool", "smtp-transport"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 password-hash = { version = "0.5", features = ["getrandom"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

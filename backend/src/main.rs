@@ -1,4 +1,5 @@
 mod app;
+mod auth_protection;
 mod db;
 mod error;
 mod models;

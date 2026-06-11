@@ -89,3 +89,14 @@ npm run check
 - O projeto usa SQLite por padrao no desenvolvimento.
 - A configuracao de reset de senha por e-mail depende das variaveis documentadas no `.env.example`.
 - Os arquivos de planejamento e contexto interno ficam ignorados no repositório.
+
+## Credenciais de teste
+
+Quando `SEED_DEMO_DATA=1` estiver ativo no backend:
+
+- estabelecimento: `admin@example.test`
+- senha do estabelecimento: `TestPassword@123`
+- profissional: `barber@example.test`
+- senha do profissional: `BarberTest@123`
+
+Essas credenciais sao apenas para desenvolvimento local.

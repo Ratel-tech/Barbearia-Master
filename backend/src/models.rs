@@ -42,6 +42,7 @@ pub struct RegisterBarbershop {
 pub struct PasswordResetRequest {
     pub email: String,
     pub account_type: String,
+    pub captcha_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
