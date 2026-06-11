@@ -1,5 +1,15 @@
-const CACHE_NAME = "barbearia-mestre-v2";
+const CACHE_NAME = "barbearia-mestre-v3";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/favicon.svg", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png"];
+
+function isCacheableRequest(request, origin) {
+  if (request.method !== "GET") return false;
+  const url = new URL(request.url);
+  return url.origin === origin && !url.pathname.startsWith("/api/");
+}
+
+function shouldCacheResponse(response) {
+  return response.ok;
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
@@ -16,17 +26,28 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  if (event.request.method !== "GET") return;
-  const url = new URL(event.request.url);
-  if (url.pathname.startsWith("/api/")) return;
+  if (!isCacheableRequest(event.request, self.location.origin)) return;
 
-  event.respondWith(
-    fetch(event.request)
-      .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-        return response;
-      })
-      .catch(() => caches.match(event.request).then((cached) => cached || caches.match("/"))),
-  );
+  event.respondWith(handleFetch(event.request));
 });
+
+async function handleFetch(request) {
+  const cache = await caches.open(CACHE_NAME);
+  try {
+    const response = await fetch(request);
+    if (shouldCacheResponse(response)) {
+      await cache.put(request, response.clone());
+      return response;
+    }
+
+    const cached = await cache.match(request);
+    if (cached) return cached;
+    return response;
+  } catch {
+    const cached = await cache.match(request);
+    if (cached) return cached;
+    const fallback = await cache.match("/");
+    if (fallback) return fallback;
+    return new Response("Offline", { status: 503, statusText: "Offline" });
+  }
+}
