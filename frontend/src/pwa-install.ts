@@ -29,7 +29,7 @@ export function installText(action: InstallAction) {
   if (action === "ios-help") {
     return {
       button: "Ver instrução",
-      message: "No iPhone, adicione pela opção Compartilhar.",
+      message: "No iPhone e iPad, adicione pela opção Compartilhar.",
       title: "Instalar no celular",
     };
   }
@@ -41,9 +41,20 @@ export function installText(action: InstallAction) {
   };
 }
 
-export function detectInstallPlatform(userAgent: string): InstallPlatform {
-  const normalized = userAgent.toLowerCase();
+export type InstallPlatformSource = {
+  maxTouchPoints?: number;
+  navigatorPlatform?: string;
+  userAgent: string;
+};
+
+export function detectInstallPlatform(source: InstallPlatformSource): InstallPlatform {
+  const normalized = source.userAgent.toLowerCase();
   if (/iphone|ipad|ipod/.test(normalized)) return "ios";
-  if (/android|mobile/.test(normalized)) return "android";
+
+  const platform = source.navigatorPlatform?.toLowerCase() ?? "";
+  if (platform === "macintel" && (source.maxTouchPoints ?? 0) > 1) return "ios";
+
+  if (/android/.test(normalized)) return "android";
+  if (/mobile/.test(normalized)) return "android";
   return "desktop";
 }

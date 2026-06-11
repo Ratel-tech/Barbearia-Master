@@ -514,7 +514,11 @@ function InstallAppPrompt() {
     return () => media.removeEventListener("change", refresh);
   }, []);
 
-  const platform = detectInstallPlatform(navigator.userAgent);
+  const platform = detectInstallPlatform({
+    maxTouchPoints: navigator.maxTouchPoints,
+    navigatorPlatform: navigator.platform,
+    userAgent: navigator.userAgent,
+  });
   const isStandalone = window.matchMedia("(display-mode: standalone)").matches || (navigator as NavigatorWithStandalone).standalone === true;
   const mobile = platform !== "desktop" || window.matchMedia("(max-width: 768px)").matches;
   const promptState = installPromptState({
